@@ -1,0 +1,20 @@
+/**
+ * Test-specific Wrangler configuration for durable-object-sql-tag integration tests.
+ * This config defines a minimal TestDurableObject for testing the SQL tag library.
+ */
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "durable-object-sql-tag-test",
+  "main": "test/test-worker.ts",
+  "compatibility_date": "2025-10-08",
+  "compatibility_flags": [
+    "enable_nodejs_tty_module",
+    "enable_nodejs_fs_module",
+    "enable_nodejs_http_modules",
+    "enable_nodejs_perf_hooks_module",
+  ],
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TestDurableObject"] }],
+  "durable_objects": {
+    "bindings": [{ "class_name": "TestDurableObject", "name": "TEST_DURABLE_OBJECT" }],
+  },
+}
