@@ -35,7 +35,7 @@ interface SqlTag {
     templateStrings: TemplateStringsArray,
     ...templateValues: (Primitive | SqlQueryFragment)[]
   ): SqlQueryFragment;
-  list: (values: Primitive[]) => SqlQueryFragment;
+  join: (values: Primitive[]) => SqlQueryFragment;
 }
 
 const sql: SqlTag = (templateStrings, ...templateValues) => {
@@ -52,14 +52,14 @@ const sql: SqlTag = (templateStrings, ...templateValues) => {
   return fragment;
 };
 
-sql.list = (values: Primitive[]) => {
-  // Handle empty arrays by generating (NULL) which will never match
+sql.join = (values: Primitive[]): SqlQueryFragment => {
+  // Handle empty arrays by generating NULL which will never match
   if (values.length === 0) {
-    const templateStrings: string[] = ["(NULL)"];
+    const templateStrings: string[] = ["NULL"];
     const templateValues: Primitive[] = [];
     return {
       build() {
-        return { query: "(NULL)", values: [] };
+        return { query: "NULL" };
       },
       isEmpty() {
         return false;
@@ -69,11 +69,7 @@ sql.list = (values: Primitive[]) => {
     };
   }
 
-  const templateStrings: string[] = [
-    "(",
-    ...(Array(values.length - 1).fill(", ") as string[]),
-    ")",
-  ];
+  const templateStrings: string[] = ["", ...(Array(values.length - 1).fill(", ") as string[]), ""];
   const templateValues = values;
   return {
     build() {

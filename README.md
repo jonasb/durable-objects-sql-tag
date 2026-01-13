@@ -31,9 +31,9 @@ const { query: sqlString, values } = query.build();
 // sqlString: "SELECT * FROM users WHERE id = ?"
 // values: [userId]
 
-// Using sql.list() for IN clauses
+// Using sql.join() for IN clauses
 const ids = [1, 2, 3];
-const listQuery = sql`SELECT * FROM users WHERE id IN ${sql.list(ids)}`;
+const listQuery = sql`SELECT * FROM users WHERE id IN (${sql.join(ids)})`;
 // Builds: "SELECT * FROM users WHERE id IN (?, ?, ?)"
 
 // Composing fragments

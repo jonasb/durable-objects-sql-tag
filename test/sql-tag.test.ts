@@ -71,9 +71,9 @@ describe("sql-tag isEmpty()", () => {
   });
 });
 
-describe("sql-tag list", () => {
+describe("sql-tag join", () => {
   test("one arg", () => {
-    expect(sql`SELECT * WHERE id IN ${sql.list([1])}`.build()).toMatchInlineSnapshot(`
+    expect(sql`SELECT * WHERE id IN (${sql.join([1])})`.build()).toMatchInlineSnapshot(`
       {
         "query": "SELECT * WHERE id IN (?)",
         "values": [
@@ -84,7 +84,7 @@ describe("sql-tag list", () => {
   });
 
   test("two args", () => {
-    expect(sql`SELECT * WHERE id IN ${sql.list([1, 2])}`.build()).toMatchInlineSnapshot(`
+    expect(sql`SELECT * WHERE id IN (${sql.join([1, 2])})`.build()).toMatchInlineSnapshot(`
       {
         "query": "SELECT * WHERE id IN (?, ?)",
         "values": [
@@ -96,7 +96,7 @@ describe("sql-tag list", () => {
   });
 
   test("three args", () => {
-    expect(sql`SELECT * WHERE id IN ${sql.list([1, 2, 3])}`.build()).toMatchInlineSnapshot(`
+    expect(sql`SELECT * WHERE id IN (${sql.join([1, 2, 3])})`.build()).toMatchInlineSnapshot(`
       {
         "query": "SELECT * WHERE id IN (?, ?, ?)",
         "values": [
@@ -104,6 +104,15 @@ describe("sql-tag list", () => {
           2,
           3,
         ],
+      }
+    `);
+  });
+
+  test("empty array", () => {
+    expect(sql`SELECT * WHERE id IN (${sql.join([])})`.build()).toMatchInlineSnapshot(`
+      {
+        "query": "SELECT * WHERE id IN (NULL)",
+        "values": undefined,
       }
     `);
   });

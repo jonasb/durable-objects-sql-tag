@@ -222,7 +222,7 @@ export class TestDurableObject extends DurableObject {
   private async testSqlList(request: Request): Promise<Response> {
     const body = await request.json<{ ids: string[] }>();
     const users = this.db.queryMany(sql`
-      SELECT * FROM users WHERE id IN ${sql.list(body.ids)}
+      SELECT * FROM users WHERE id IN (${sql.join(body.ids)})
     `);
     return new Response(JSON.stringify(users), {
       headers: { "Content-Type": "application/json" },
