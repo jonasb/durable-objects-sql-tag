@@ -1,13 +1,17 @@
 import type { DurableObjectStorage, SqlStorage } from "@cloudflare/workers-types";
 import {
   sql,
+  type MappedSqlQueryFragment,
   type PreparedStatement,
   type Primitive,
   type SqlQueryFragment,
   type SqlRow,
 } from "./sql-tag.js";
 
-type FragmentOrStatement = PreparedStatement | SqlQueryFragment;
+type FragmentOrStatement =
+  | PreparedStatement
+  | SqlQueryFragment
+  | MappedSqlQueryFragment<SqlRow, SqlRow>;
 
 interface BaseDatabaseWrapper {
   storage: SqlStorage;
@@ -83,13 +87,22 @@ function createWrapper(
   callbacks: QueryCallbacks | undefined,
 ): RootDatabaseWrapper {
   function queryCommon<TRow extends SqlRow>(statement: FragmentOrStatement): TRow[] {
+    // Extract mapper if present (for MappedSqlQueryFragment)
+    const mapper = "mapper" in statement ? (statement.mapper as (row: SqlRow) => TRow) : null;
+
     if ("build" in statement) {
       statement = statement.build();
     }
     callbacks?.beforeQuery?.(statement.query);
     const cursor = storage.sql.exec<TRow>(statement.query, ...(statement.values || []));
-    const rows = cursor.toArray();
+    let rows = cursor.toArray();
     callbacks?.afterQuery?.(statement.query, rows);
+
+    // Apply mapper if present
+    if (mapper) {
+      rows = rows.map(mapper) as TRow[];
+    }
+
     return rows;
   }
 

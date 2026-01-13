@@ -102,6 +102,9 @@ export class TestDurableObject extends DurableObject {
       if (path === "/test/sql-fragments") {
         return await this.testSqlFragments(request);
       }
+      if (path === "/test/sql-map") {
+        return await this.testSqlMap(request);
+      }
 
       // Migration operations
       if (path === "/test/migration-version") {
@@ -222,7 +225,7 @@ export class TestDurableObject extends DurableObject {
   private async testSqlList(request: Request): Promise<Response> {
     const body = await request.json<{ ids: string[] }>();
     const users = this.db.queryMany(sql`
-      SELECT * FROM users WHERE id IN ${sql.list(body.ids)}
+      SELECT * FROM users WHERE id IN (${sql.join(body.ids)})
     `);
     return new Response(JSON.stringify(users), {
       headers: { "Content-Type": "application/json" },
@@ -241,6 +244,20 @@ export class TestDurableObject extends DurableObject {
       query = sql`SELECT * FROM users`;
     }
     const users = this.db.queryMany(query);
+    return new Response(JSON.stringify(users), {
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  private async testSqlMap(_request: Request): Promise<Response> {
+    // Query users and transform the results using .map()
+    const users = this.db.queryMany(
+      sql`SELECT id, name, email FROM users ORDER BY name`.map((row) => ({
+        odgovor: row.id,
+        upperName: (row.name as string).toUpperCase(),
+        emailDomain: (row.email as string).split("@")[1],
+      })),
+    );
     return new Response(JSON.stringify(users), {
       headers: { "Content-Type": "application/json" },
     });

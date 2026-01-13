@@ -110,6 +110,31 @@ describe("DatabaseWrapper query operations", () => {
       expect(users.map((u) => u.name)).toEqual(["Alice", "Bob", "Charlie"]);
     });
 
+    test("applies .map() transformation to results", async () => {
+      // Insert multiple users
+      await insertTestUsers();
+
+      const response = await SELF.fetch(urlWithInstance("/sql-map"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+
+      expect(response.status).toBe(200);
+      const users: { upperName: string; emailDomain: string }[] = await response.json();
+      expect(users).toHaveLength(3);
+      // Verify transformation was applied
+      expect(users.map((u) => u.upperName)).toEqual(["ALICE", "BOB", "CHARLIE"]);
+      expect(users.map((u) => u.emailDomain)).toEqual([
+        "example.com",
+        "example.com",
+        "example.com",
+      ]);
+      // Original fields should not be present
+      expect(users[0]).not.toHaveProperty("name");
+      expect(users[0]).not.toHaveProperty("email");
+    });
+
     test("returns empty array when no rows match", async () => {
       const response = await SELF.fetch(urlWithInstance("/query-many"), {
         method: "POST",

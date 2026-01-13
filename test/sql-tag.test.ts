@@ -71,9 +71,47 @@ describe("sql-tag isEmpty()", () => {
   });
 });
 
-describe("sql-tag list", () => {
+describe("sql-tag map", () => {
+  test("returns a mapped fragment with mapper function", () => {
+    const mapper = (row: { name: string }) => ({ upperName: row.name.toUpperCase() });
+    const mapped = sql`SELECT name FROM users`.map(mapper);
+
+    expect(mapped.mapper).toBe(mapper);
+  });
+
+  test("mapped fragment still has build()", () => {
+    const mapped = sql`SELECT * FROM users WHERE id = ${1}`.map((row) => row);
+
+    expect(mapped.build()).toMatchInlineSnapshot(`
+      {
+        "query": "SELECT * FROM users WHERE id = ?",
+        "values": [
+          1,
+        ],
+      }
+    `);
+  });
+
+  test("mapped fragment still has isEmpty()", () => {
+    const mapped = sql`SELECT * FROM users`.map((row) => row);
+    expect(mapped.isEmpty()).toBe(false);
+
+    const emptyMapped = sql``.map((row) => row);
+    expect(emptyMapped.isEmpty()).toBe(true);
+  });
+
+  test("mapped fragment preserves templateStrings and templateValues", () => {
+    const original = sql`SELECT * FROM users WHERE id = ${42}`;
+    const mapped = original.map((row) => row);
+
+    expect(mapped.templateStrings).toBe(original.templateStrings);
+    expect(mapped.templateValues).toBe(original.templateValues);
+  });
+});
+
+describe("sql-tag join", () => {
   test("one arg", () => {
-    expect(sql`SELECT * WHERE id IN ${sql.list([1])}`.build()).toMatchInlineSnapshot(`
+    expect(sql`SELECT * WHERE id IN (${sql.join([1])})`.build()).toMatchInlineSnapshot(`
       {
         "query": "SELECT * WHERE id IN (?)",
         "values": [
@@ -84,7 +122,7 @@ describe("sql-tag list", () => {
   });
 
   test("two args", () => {
-    expect(sql`SELECT * WHERE id IN ${sql.list([1, 2])}`.build()).toMatchInlineSnapshot(`
+    expect(sql`SELECT * WHERE id IN (${sql.join([1, 2])})`.build()).toMatchInlineSnapshot(`
       {
         "query": "SELECT * WHERE id IN (?, ?)",
         "values": [
@@ -96,7 +134,7 @@ describe("sql-tag list", () => {
   });
 
   test("three args", () => {
-    expect(sql`SELECT * WHERE id IN ${sql.list([1, 2, 3])}`.build()).toMatchInlineSnapshot(`
+    expect(sql`SELECT * WHERE id IN (${sql.join([1, 2, 3])})`.build()).toMatchInlineSnapshot(`
       {
         "query": "SELECT * WHERE id IN (?, ?, ?)",
         "values": [
@@ -104,6 +142,15 @@ describe("sql-tag list", () => {
           2,
           3,
         ],
+      }
+    `);
+  });
+
+  test("empty array", () => {
+    expect(sql`SELECT * WHERE id IN (${sql.join([])})`.build()).toMatchInlineSnapshot(`
+      {
+        "query": "SELECT * WHERE id IN (NULL)",
+        "values": undefined,
       }
     `);
   });

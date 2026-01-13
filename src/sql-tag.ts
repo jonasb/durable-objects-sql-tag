@@ -12,11 +12,17 @@ import type { SqlStorageValue } from "@cloudflare/workers-types";
  */
 export type Primitive = string | number | boolean | null | undefined | ArrayBuffer | Uint8Array;
 
-export interface SqlQueryFragment {
+export interface SqlQueryFragment<TRow extends SqlRow = SqlRow> {
   build(): PreparedStatement;
   isEmpty(): boolean;
+  map<U extends SqlRow>(mapper: (row: TRow) => U): MappedSqlQueryFragment<TRow, U>;
   templateStrings: TemplateStringsArray | string[];
   templateValues: (Primitive | SqlQueryFragment)[];
+}
+
+export interface MappedSqlQueryFragment<TRaw extends SqlRow, TMapped extends SqlRow>
+  extends Omit<SqlQueryFragment<TMapped>, "map"> {
+  mapper: (row: TRaw) => TMapped;
 }
 
 export interface PreparedStatement {
@@ -35,16 +41,25 @@ interface SqlTag {
     templateStrings: TemplateStringsArray,
     ...templateValues: (Primitive | SqlQueryFragment)[]
   ): SqlQueryFragment;
-  list: (values: Primitive[]) => SqlQueryFragment;
+  join: (values: Primitive[]) => SqlQueryFragment;
 }
 
 const sql: SqlTag = (templateStrings, ...templateValues) => {
-  const fragment = {
+  const fragment: SqlQueryFragment = {
     build() {
       return expandTemplate(templateStrings, templateValues);
     },
     isEmpty() {
       return isTemplateEmpty(templateStrings, templateValues);
+    },
+    map<U extends SqlRow>(mapper: (row: SqlRow) => U): MappedSqlQueryFragment<SqlRow, U> {
+      return {
+        build: fragment.build,
+        isEmpty: fragment.isEmpty,
+        templateStrings: fragment.templateStrings,
+        templateValues: fragment.templateValues,
+        mapper,
+      };
     },
     templateStrings,
     templateValues,
@@ -52,39 +67,60 @@ const sql: SqlTag = (templateStrings, ...templateValues) => {
   return fragment;
 };
 
-sql.list = (values: Primitive[]) => {
-  // Handle empty arrays by generating (NULL) which will never match
+sql.join = (values: Primitive[]): SqlQueryFragment => {
+  // Handle empty arrays by generating NULL which will never match
   if (values.length === 0) {
-    const templateStrings: string[] = ["(NULL)"];
+    const templateStrings: string[] = ["NULL"];
     const templateValues: Primitive[] = [];
-    return {
+    const fragment: SqlQueryFragment = {
       build() {
-        return { query: "(NULL)", values: [] };
+        return { query: "NULL" };
       },
       isEmpty() {
         return false;
       },
+      map<U extends SqlRow>(mapper: (row: SqlRow) => U): MappedSqlQueryFragment<SqlRow, U> {
+        return {
+          build: fragment.build,
+          isEmpty: fragment.isEmpty,
+          templateStrings: fragment.templateStrings,
+          templateValues: fragment.templateValues,
+          mapper,
+        };
+      },
       templateStrings,
       templateValues,
     };
+    return fragment;
   }
 
-  const templateStrings: string[] = [
-    "(",
-    ...(Array(values.length - 1).fill(", ") as string[]),
-    ")",
-  ];
-  const templateValues = values;
-  return {
+  // Create templateStrings: ["", ", ", ", ", ""] with length = values.length + 1
+  const templateStrings: string[] = [""];
+  for (let i = 1; i < values.length; i++) {
+    templateStrings.push(", ");
+  }
+  templateStrings.push("");
+
+  const fragment: SqlQueryFragment = {
     build() {
-      return expandTemplate(templateStrings, templateValues);
+      return expandTemplate(templateStrings, values);
     },
     isEmpty() {
-      return isTemplateEmpty(templateStrings, templateValues);
+      return isTemplateEmpty(templateStrings, values);
+    },
+    map<U extends SqlRow>(mapper: (row: SqlRow) => U): MappedSqlQueryFragment<SqlRow, U> {
+      return {
+        build: fragment.build,
+        isEmpty: fragment.isEmpty,
+        templateStrings: fragment.templateStrings,
+        templateValues: fragment.templateValues,
+        mapper,
+      };
     },
     templateStrings,
-    templateValues,
+    templateValues: values,
   };
+  return fragment;
 };
 
 function isTemplateEmpty(

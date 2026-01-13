@@ -73,7 +73,7 @@ describe("SQL tag integration with real SqlStorage", () => {
     });
   });
 
-  describe("sql.list() with IN clause", () => {
+  describe("sql.join() with IN clause", () => {
     test("filters rows using IN clause with multiple values", async () => {
       // Insert multiple users
       await insertTestUsers();
