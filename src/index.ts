@@ -4,3 +4,4 @@
 
 export * from "./sql-tag.js";
 export * from "./db-wrapper.js";
+export * from "./alter-table-columns.js";

@@ -13,6 +13,7 @@ A library for working with SQLite in [Cloudflare Durable Objects](https://develo
 - Type-safe SQL template literals with parameterized queries
 - Database wrapper with convenient query helpers (`queryOne`, `queryMany`, etc.)
 - Built-in migration system with schema versioning
+- Column alterations (add/drop `NOT NULL` and `UNIQUE`, change type) via automatic table rebuilds
 - SQL injection prevention through proper parameterization
 - Support for all SQLite types including binary data (ArrayBuffer, Uint8Array)
 
@@ -75,22 +76,22 @@ export class MyDurableObject extends DurableObject {
   async fetch(request: Request): Promise<Response> {
     // Query a single row (throws if not exactly one row)
     const user = this.db.queryOne<{ id: string; name: string }>(
-      sql`SELECT * FROM users WHERE id = ${userId}`
+      sql`SELECT * FROM users WHERE id = ${userId}`,
     );
 
     // Query zero or one row
     const maybeUser = this.db.queryNoneOrOne<{ id: string; name: string }>(
-      sql`SELECT * FROM users WHERE id = ${userId}`
+      sql`SELECT * FROM users WHERE id = ${userId}`,
     );
 
     // Query multiple rows
     const users = this.db.queryMany<{ id: string; name: string }>(
-      sql`SELECT * FROM users WHERE status = ${"active"}`
+      sql`SELECT * FROM users WHERE status = ${"active"}`,
     );
 
     // Execute a write operation
     const { rowsRead, rowsWritten } = this.db.run(
-      sql`INSERT INTO users (id, name, email) VALUES (${id}, ${name}, ${email})`
+      sql`INSERT INTO users (id, name, email) VALUES (${id}, ${name}, ${email})`,
     );
 
     // Execute without expecting rows (throws if rows returned)
@@ -103,16 +104,16 @@ export class MyDurableObject extends DurableObject {
 
 ### Query Methods
 
-| Method | Description |
-|--------|-------------|
-| `queryOne<T>(statement)` | Returns exactly one row. Throws if 0 or 2+ rows. |
-| `queryNoneOrOne<T>(statement)` | Returns one row or `null`. Throws if 2+ rows. |
-| `queryMany<T>(statement)` | Returns all matching rows as an array. |
-| `queryNone(statement)` | Executes statement. Throws if any rows returned. |
-| `run(statement)` | Executes statement. Returns `{ rowsRead, rowsWritten }`. |
-| `pragma(name)` | Executes PRAGMA, returns single value. |
-| `pragmaFull<T>(name)` | Executes PRAGMA, returns full result set. |
-| `transactionSync(fn)` | Runs function in a synchronous transaction. |
+| Method                         | Description                                              |
+| ------------------------------ | -------------------------------------------------------- |
+| `queryOne<T>(statement)`       | Returns exactly one row. Throws if 0 or 2+ rows.         |
+| `queryNoneOrOne<T>(statement)` | Returns one row or `null`. Throws if 2+ rows.            |
+| `queryMany<T>(statement)`      | Returns all matching rows as an array.                   |
+| `queryNone(statement)`         | Executes statement. Throws if any rows returned.         |
+| `run(statement)`               | Executes statement. Returns `{ rowsRead, rowsWritten }`. |
+| `pragma(name)`                 | Executes PRAGMA, returns single value.                   |
+| `pragmaFull<T>(name)`          | Executes PRAGMA, returns full result set.                |
+| `transactionSync(fn)`          | Runs function in a synchronous transaction.              |
 
 ### Migrations
 
@@ -141,9 +142,53 @@ const migrations: MigrationVersionDefinition[] = [
 import { getMigrationStatus } from "durable-objects-sql-tag";
 const { currentVersion, targetVersion, migrationsToApply } = getMigrationStatus(
   ctx.storage,
-  migrations
+  migrations,
 );
 ```
+
+### Altering Columns
+
+SQLite's `ALTER TABLE` can only add, drop, and rename whole columns. To add or drop a `NOT NULL` or
+`UNIQUE` constraint, or change a column's type, the table has to be rebuilt. `alterTableColumns`
+performs that [12-step rebuild](https://sqlite.org/lang_altertable.html#making_other_kinds_of_table_schema_changes)
+for you — preserving the table's data along with its indexes and triggers — and is meant to be used
+inside a migration:
+
+```ts
+import { sql, alterTableColumns, type MigrationVersionDefinition } from "durable-objects-sql-tag";
+
+const migrations: MigrationVersionDefinition[] = [
+  {
+    name: "Create users table",
+    migrate(db) {
+      db.run(sql`CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL) STRICT`);
+    },
+  },
+  {
+    name: "Make email optional and unique",
+    migrate(db) {
+      alterTableColumns(db, "users", [
+        { action: "dropNotNull", column: "email" },
+        { action: "addUnique", column: "email" },
+      ]);
+    },
+  },
+];
+```
+
+Supported actions:
+
+| Action                                          | Description                                                                                                                                                              |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `{ action: "addNotNull", column, onConflict? }` | Add a `NOT NULL` constraint (with an optional `ON CONFLICT` clause: `ROLLBACK`, `ABORT`, `FAIL`, `IGNORE`, or `REPLACE`).                                                |
+| `{ action: "dropNotNull", column }`             | Remove a `NOT NULL` constraint.                                                                                                                                          |
+| `{ action: "addUnique", column }`               | Add a `UNIQUE` constraint.                                                                                                                                               |
+| `{ action: "dropUnique", column }`              | Remove a `UNIQUE` constraint.                                                                                                                                            |
+| `{ action: "changeType", column, from, to }`    | Change a column's type. `from` must match the current type (matched ignoring case and whitespace) and may span multiple tokens, e.g. `from: "VARCHAR(255)", to: "TEXT"`. |
+
+The rebuild runs inside a synchronous transaction and sets `PRAGMA defer_foreign_keys = TRUE` so
+that foreign key constraints aren't tripped mid-rebuild; they are still checked when the transaction
+commits.
 
 ### Query Callbacks
 
@@ -166,6 +211,7 @@ const dbWithLogging = db.withCallbacks({
 ### Supported Types
 
 **Input types (Primitive):**
+
 - `string`
 - `number`
 - `boolean` (stored as `"true"`/`"false"` strings)
@@ -175,6 +221,7 @@ const dbWithLogging = db.withCallbacks({
 - `Uint8Array`
 
 **Output types (SqlStorageValue):**
+
 - `string`
 - `number`
 - `null`

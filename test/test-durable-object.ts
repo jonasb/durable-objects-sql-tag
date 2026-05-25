@@ -1,7 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
 import {
+  alterTableColumns,
   sql,
   wrapDatabase,
+  type AlterTableColumnAction,
   type MigrationVersionDefinition,
   type Primitive,
   type RootDatabaseWrapper,
@@ -109,6 +111,9 @@ export class TestDurableObject extends DurableObject {
       }
       if (path === "/test/pragma") {
         return this.testPragma();
+      }
+      if (path === "/test/alter-table-columns") {
+        return await this.testAlterTableColumns(request);
       }
 
       // Error handling
@@ -251,6 +256,60 @@ export class TestDurableObject extends DurableObject {
       SELECT value FROM metadata WHERE key = 'schema_version'
     `);
     return new Response(JSON.stringify(version), {
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  /**
+   * Exercises alterTableColumns against a freshly created table and returns the resulting schema
+   * plus the queries that were issued, so tests can assert on both the outcome and the steps.
+   */
+  private async testAlterTableColumns(request: Request): Promise<Response> {
+    const body = await request.json<{
+      tableName: string;
+      createSql: string;
+      actions: AlterTableColumnAction[];
+      seedRows?: Record<string, Primitive>[];
+    }>();
+
+    // Identifiers come from the test, not user input, but quote them so test cases can exercise
+    // table/column names that require quoting (e.g. reserved words).
+    const quote = (name: string) => `"${name.replace(/"/g, '""')}"`;
+    const quotedTable = quote(body.tableName);
+
+    // Start from a clean slate so the endpoint can be called repeatedly within one instance.
+    this.ctx.storage.sql.exec(`DROP TABLE IF EXISTS ${quotedTable}`);
+    this.ctx.storage.sql.exec(`DROP TABLE IF EXISTS ${quote(`temp_${body.tableName}`)}`);
+    this.ctx.storage.sql.exec(body.createSql);
+
+    for (const row of body.seedRows ?? []) {
+      const columns = Object.keys(row);
+      const values = Object.values(row);
+      this.db.run({
+        query: `INSERT INTO ${quotedTable} (${columns.map(quote).join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
+        values,
+      });
+    }
+
+    const queries: string[] = [];
+    const db = this.db.withCallbacks({
+      beforeQuery(query) {
+        queries.push(query);
+      },
+    });
+
+    alterTableColumns(db, body.tableName, body.actions);
+
+    const schema = this.db
+      .queryMany<{ sql: string | null }>(
+        sql`SELECT sql FROM sqlite_master WHERE tbl_name = ${body.tableName} AND sql IS NOT NULL ORDER BY type DESC, name`,
+      )
+      .map((it) => it.sql)
+      .join("\n\n");
+
+    const rows = this.db.queryMany({ query: `SELECT * FROM ${quotedTable} ORDER BY rowid` });
+
+    return new Response(JSON.stringify({ schema, queries, rows }), {
       headers: { "Content-Type": "application/json" },
     });
   }
