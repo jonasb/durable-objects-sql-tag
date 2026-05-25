@@ -178,13 +178,13 @@ const migrations: MigrationVersionDefinition[] = [
 
 Supported actions:
 
-| Action                                          | Description                                                                                                               |
-| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `{ action: "addNotNull", column, onConflict? }` | Add a `NOT NULL` constraint (with an optional `ON CONFLICT` clause: `ROLLBACK`, `ABORT`, `FAIL`, `IGNORE`, or `REPLACE`). |
-| `{ action: "dropNotNull", column }`             | Remove a `NOT NULL` constraint.                                                                                           |
-| `{ action: "addUnique", column }`               | Add a `UNIQUE` constraint.                                                                                                |
-| `{ action: "dropUnique", column }`              | Remove a `UNIQUE` constraint.                                                                                             |
-| `{ action: "changeType", column, from, to }`    | Change a column's type (e.g. `from: "INTEGER", to: "REAL"`).                                                              |
+| Action                                          | Description                                                                                                                                                              |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `{ action: "addNotNull", column, onConflict? }` | Add a `NOT NULL` constraint (with an optional `ON CONFLICT` clause: `ROLLBACK`, `ABORT`, `FAIL`, `IGNORE`, or `REPLACE`).                                                |
+| `{ action: "dropNotNull", column }`             | Remove a `NOT NULL` constraint.                                                                                                                                          |
+| `{ action: "addUnique", column }`               | Add a `UNIQUE` constraint.                                                                                                                                               |
+| `{ action: "dropUnique", column }`              | Remove a `UNIQUE` constraint.                                                                                                                                            |
+| `{ action: "changeType", column, from, to }`    | Change a column's type. `from` must match the current type (matched ignoring case and whitespace) and may span multiple tokens, e.g. `from: "VARCHAR(255)", to: "TEXT"`. |
 
 The rebuild runs inside a synchronous transaction and sets `PRAGMA defer_foreign_keys = TRUE` so
 that foreign key constraints aren't tripped mid-rebuild; they are still checked when the transaction

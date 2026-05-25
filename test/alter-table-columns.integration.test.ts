@@ -70,6 +70,17 @@ describe("alterTableColumns", () => {
     expect(schema).toBe('CREATE TABLE "alter_test" (id INTEGER PRIMARY KEY, name TEXT) STRICT');
   });
 
+  test("drops a UNIQUE constraint with a conflict clause", async () => {
+    const { schema } = await alterTable({
+      tableName: "alter_test",
+      createSql:
+        "CREATE TABLE alter_test (id INTEGER PRIMARY KEY, name TEXT UNIQUE ON CONFLICT IGNORE) STRICT",
+      actions: [{ action: "dropUnique", column: "name" }],
+    });
+
+    expect(schema).toBe('CREATE TABLE "alter_test" (id INTEGER PRIMARY KEY, name TEXT) STRICT');
+  });
+
   test("changes a column type", async () => {
     const { schema } = await alterTable({
       tableName: "alter_test",
@@ -78,6 +89,26 @@ describe("alterTableColumns", () => {
     });
 
     expect(schema).toBe('CREATE TABLE "alter_test" (id INTEGER PRIMARY KEY, number REAL) STRICT');
+  });
+
+  test("changes a column to a multi-token type", async () => {
+    const { schema } = await alterTable({
+      tableName: "alter_test",
+      createSql: "CREATE TABLE alter_test (id INTEGER PRIMARY KEY, code TEXT)",
+      actions: [{ action: "changeType", column: "code", from: "TEXT", to: "VARCHAR(255)" }],
+    });
+
+    expect(schema).toBe('CREATE TABLE "alter_test" (id INTEGER PRIMARY KEY, code VARCHAR(255))');
+  });
+
+  test("changes a multi-token column type, ignoring whitespace and case", async () => {
+    const { schema } = await alterTable({
+      tableName: "alter_test",
+      createSql: "CREATE TABLE alter_test (id INTEGER PRIMARY KEY, amount DECIMAL(10, 2))",
+      actions: [{ action: "changeType", column: "amount", from: "decimal(10,2)", to: "REAL" }],
+    });
+
+    expect(schema).toBe('CREATE TABLE "alter_test" (id INTEGER PRIMARY KEY, amount REAL)');
   });
 
   test("adds a NOT NULL constraint", async () => {
@@ -173,6 +204,20 @@ describe("alterTableColumns", () => {
     expect(schema).toContain("CREATE INDEX alter_test_name ON alter_test (name)");
   });
 
+  test("recreates associated triggers", async () => {
+    const { schema } = await alterTable({
+      tableName: "alter_test",
+      createSql:
+        "CREATE TABLE alter_test (id INTEGER PRIMARY KEY, name TEXT, touched INTEGER);\n" +
+        "CREATE TRIGGER alter_test_touch AFTER UPDATE ON alter_test BEGIN" +
+        " UPDATE alter_test SET touched = 1 WHERE id = NEW.id; END",
+      actions: [{ action: "addNotNull", column: "name" }],
+    });
+
+    expect(schema).toContain("CREATE TRIGGER alter_test_touch");
+    expect(schema).toContain("UPDATE ON alter_test");
+  });
+
   test("handles a table name that requires quoting", async () => {
     const { schema, rows } = await alterTable({
       tableName: "order",
@@ -214,6 +259,18 @@ describe("alterTableColumns", () => {
       'CREATE TABLE "alter_test" (id INTEGER PRIMARY KEY, "display name" TEXT NOT NULL) STRICT',
     );
     expect(rows).toEqual([{ id: 1, "display name": "Ada" }]);
+  });
+
+  test("matches a column name case-insensitively", async () => {
+    const { schema } = await alterTable({
+      tableName: "alter_test",
+      createSql: "CREATE TABLE alter_test (id INTEGER PRIMARY KEY, Name TEXT) STRICT",
+      actions: [{ action: "addNotNull", column: "name" }],
+    });
+
+    expect(schema).toBe(
+      'CREATE TABLE "alter_test" (id INTEGER PRIMARY KEY, Name TEXT NOT NULL) STRICT',
+    );
   });
 
   test("throws when the column does not exist", async () => {

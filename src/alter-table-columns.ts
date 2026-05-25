@@ -97,7 +97,11 @@ function modifyTableSql(
   for (const action of actions) {
     const columnDefinition = statement.columnDefinitions.find((it) => {
       const nonWhitespaceIndex = it.findIndex((it) => it.trim().length > 0);
-      return unquoteIdentifier(it[nonWhitespaceIndex] ?? "") === action.column;
+      // SQLite resolves column names case-insensitively, so compare unquoted names that way too.
+      return (
+        unquoteIdentifier(it[nonWhitespaceIndex] ?? "").toLowerCase() ===
+        action.column.toLowerCase()
+      );
     });
     if (!columnDefinition) {
       throw new Error(`Column not found: ${action.column}`);
@@ -117,30 +121,25 @@ function modifyTableSql(
         break;
       }
       case "dropUnique": {
-        const index = columnDefinition.findIndex((it) => it.toUpperCase() === "UNIQUE");
-        if (index === -1) {
+        const uniqueSpan = findUniqueSpan(columnDefinition);
+        if (!uniqueSpan) {
           throw new Error(`Column ${action.column} is not unique`);
         }
-        columnDefinition.splice(index, 1);
-        if (index > 0 && columnDefinition[index - 1]!.trim().length === 0) {
-          columnDefinition.splice(index - 1, 1);
-        }
+        removeSpanAndPrecedingWhitespace(columnDefinition, uniqueSpan);
         break;
       }
       case "changeType": {
-        const fromTokens = splitTokens(action.from);
-        const toTokens = splitTokens(action.to);
-        if (fromTokens.length !== 1) {
-          throw new Error(`Currently only supports single token types: ${action.from}`);
-        }
-        const typeIndex = columnNameIndex + 2; // separated by whitespace
-        const existingType = columnDefinition[typeIndex];
-        if (existingType !== action.from) {
+        // The type follows the column name and a single whitespace token. It may span multiple
+        // tokens (e.g. VARCHAR(255) or DOUBLE PRECISION), so match the requested `from` type by
+        // comparing the type's tokens, ignoring whitespace and case.
+        const typeStart = columnNameIndex + 2;
+        const typeEnd = matchTypeSpanEnd(columnDefinition, typeStart, action.from);
+        if (typeEnd === -1) {
           throw new Error(
-            `Column ${action.column} is not of type ${action.from} (found ${existingType})`,
+            `Column ${action.column} is not of type ${action.from} (found ${columnDefinition[typeStart] ?? ""})`,
           );
         }
-        columnDefinition.splice(typeIndex, 1, ...toTokens);
+        columnDefinition.splice(typeStart, typeEnd - typeStart, action.to);
         break;
       }
       case "addNotNull": {
@@ -401,7 +400,7 @@ function renameTable(statement: TableCreationTokens, oldName: string, newName: s
             statement.pre[i] = newName;
             return;
           }
-          if (token == `"${oldName}"`) {
+          if (token === `"${oldName}"`) {
             statement.pre[i] = `"${newName}"`;
             return;
           }
@@ -429,7 +428,7 @@ function renameTable(statement: TableCreationTokens, oldName: string, newName: s
             statement.pre[i] = newName;
             return;
           }
-          if (token == `"${oldName}"`) {
+          if (token === `"${oldName}"`) {
             statement.pre[i] = `"${newName}"`;
             return;
           }
@@ -496,6 +495,83 @@ function findNotNullSpan(tokens: string[]) {
     return { startIndex, endIndex: tokens.length - 1 };
   }
   return null;
+}
+
+/**
+ * Finds the span of a `UNIQUE` column constraint, including an optional `ON CONFLICT <resolution>`
+ * clause, so the whole constraint can be removed. Returns `null` if the column has no `UNIQUE`
+ * constraint.
+ */
+function findUniqueSpan(tokens: string[]) {
+  let state: "" | "unique" | "on" | "conflict" = "";
+  let startIndex = -1;
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]!;
+    const tokenUpper = token.toUpperCase();
+    const isWhitespace = token.trim().length === 0;
+    switch (state) {
+      case "":
+        if (tokenUpper === "UNIQUE") {
+          state = "unique";
+          startIndex = i;
+        }
+        break;
+      case "unique":
+        if (tokenUpper === "ON") {
+          state = "on";
+        } else if (!isWhitespace) {
+          // UNIQUE not followed by an ON CONFLICT clause
+          return { startIndex, endIndex: startIndex };
+        }
+        break;
+      case "on":
+        if (tokenUpper === "CONFLICT") {
+          state = "conflict";
+        } else if (!isWhitespace) {
+          throw new Error(`Unexpected token: ${token}`);
+        }
+        break;
+      case "conflict":
+        if (!isWhitespace) {
+          if (!["ROLLBACK", "ABORT", "FAIL", "IGNORE", "REPLACE"].includes(tokenUpper)) {
+            throw new Error(`Unexpected conflict resolution: ${token}`);
+          }
+          return { startIndex, endIndex: i };
+        }
+    }
+  }
+  if (state === "unique" || state === "on" || state === "conflict") {
+    // UNIQUE (optionally with a trailing ON CONFLICT clause) at the end of the tokens
+    return { startIndex, endIndex: tokens.length - 1 };
+  }
+  return null;
+}
+
+/**
+ * Matches a (possibly multi-token) column type starting at `typeStart`, comparing against `from`
+ * ignoring whitespace and case. Returns the exclusive end index of the matched span, or -1 if the
+ * type at `typeStart` doesn't match `from`.
+ */
+function matchTypeSpanEnd(tokens: string[], typeStart: number, from: string): number {
+  const target = from.replace(/\s+/g, "").toUpperCase();
+  if (target.length === 0) {
+    return -1;
+  }
+  let accumulated = "";
+  for (let i = typeStart; i < tokens.length; i++) {
+    const token = tokens[i]!;
+    if (token.trim().length === 0) {
+      continue; // whitespace around or within the type isn't significant for matching
+    }
+    accumulated += token.toUpperCase();
+    if (!target.startsWith(accumulated)) {
+      return -1;
+    }
+    if (accumulated === target) {
+      return i + 1;
+    }
+  }
+  return -1;
 }
 
 function removeSpanAndPrecedingWhitespace(
