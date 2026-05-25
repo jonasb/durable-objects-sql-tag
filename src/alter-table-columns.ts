@@ -47,6 +47,10 @@ export function alterTableColumns(
     db.run({ query: "PRAGMA defer_foreign_keys = TRUE" });
 
     const tempTableName = `temp_${tableName}`;
+    // Quote identifiers when interpolating them into executable statements so that table names
+    // requiring quoting (reserved words, names with spaces/punctuation) are handled safely.
+    const quotedTableName = quoteIdentifier(tableName);
+    const quotedTempTableName = quoteIdentifier(tempTableName);
 
     // Remember the indexes and triggers associated with the table so they can be recreated, since
     // dropping the table also drops them.
@@ -62,11 +66,11 @@ export function alterTableColumns(
     db.run({ query: updatedTableSql });
 
     // Copy content from the old table into the new one.
-    db.run({ query: `INSERT INTO ${tempTableName} SELECT * FROM ${tableName}` });
+    db.run({ query: `INSERT INTO ${quotedTempTableName} SELECT * FROM ${quotedTableName}` });
 
     // Drop the old table and rename the new one into its place.
-    db.run({ query: `DROP TABLE ${tableName}` });
-    db.run({ query: `ALTER TABLE ${tempTableName} RENAME TO ${tableName}` });
+    db.run({ query: `DROP TABLE ${quotedTableName}` });
+    db.run({ query: `ALTER TABLE ${quotedTempTableName} RENAME TO ${quotedTableName}` });
 
     // Recreate the indexes and triggers that belonged to the old table.
     for (const { type, sql: sqlStatement } of schema) {
@@ -93,7 +97,7 @@ function modifyTableSql(
   for (const action of actions) {
     const columnDefinition = statement.columnDefinitions.find((it) => {
       const nonWhitespaceIndex = it.findIndex((it) => it.trim().length > 0);
-      return it[nonWhitespaceIndex] === action.column;
+      return unquoteIdentifier(it[nonWhitespaceIndex] ?? "") === action.column;
     });
     if (!columnDefinition) {
       throw new Error(`Column not found: ${action.column}`);
@@ -171,8 +175,141 @@ interface TableCreationTokens {
   post: string[];
 }
 
+function quoteIdentifier(name: string): string {
+  return `"${name.replace(/"/g, '""')}"`;
+}
+
+/**
+ * Returns the bare name of a (possibly quoted) identifier token so it can be compared against a
+ * caller-supplied column name. Handles double-quoted, backtick-quoted, and square-bracketed
+ * identifiers; a bare token is returned unchanged.
+ */
+function unquoteIdentifier(token: string): string {
+  const first = token[0];
+  if (first === '"' || first === "`") {
+    return token.slice(1, -1).replaceAll(first + first, first);
+  }
+  if (first === "[" && token.endsWith("]")) {
+    return token.slice(1, -1);
+  }
+  return token;
+}
+
+/**
+ * Splits SQL into tokens, keeping whitespace runs, commas, and parentheses as standalone tokens so
+ * the rest of the code can reason about column boundaries and constraints. Quoted strings, quoted
+ * and bracketed identifiers (double-quoted, backtick-quoted, or square-bracketed), and both line
+ * and block comments are emitted as single opaque tokens so that commas, parentheses, and keywords
+ * appearing inside them aren't mistaken for SQL structure. The tokens concatenate back to the
+ * original input.
+ */
 function splitTokens(text: string): string[] {
-  return text.split(/(\s+|,|[(]|[)])/g);
+  const tokens: string[] = [];
+  const length = text.length;
+  let index = 0;
+
+  while (index < length) {
+    const char = text[index]!;
+
+    // Quoted string ('...') or quoted identifier ("...", `...`). A quote is escaped by doubling it.
+    if (char === "'" || char === '"' || char === "`") {
+      let end = index + 1;
+      while (end < length) {
+        if (text[end] === char) {
+          if (text[end + 1] === char) {
+            end += 2; // escaped quote, keep going
+            continue;
+          }
+          end += 1; // include the closing quote
+          break;
+        }
+        end += 1;
+      }
+      tokens.push(text.slice(index, end));
+      index = end;
+      continue;
+    }
+
+    // Bracketed identifier ([...]).
+    if (char === "[") {
+      let end = index + 1;
+      while (end < length && text[end] !== "]") {
+        end += 1;
+      }
+      if (end < length) {
+        end += 1; // include the closing bracket
+      }
+      tokens.push(text.slice(index, end));
+      index = end;
+      continue;
+    }
+
+    // Line comment (-- ... to end of line).
+    if (char === "-" && text[index + 1] === "-") {
+      let end = index + 2;
+      while (end < length && text[end] !== "\n") {
+        end += 1;
+      }
+      tokens.push(text.slice(index, end));
+      index = end;
+      continue;
+    }
+
+    // Block comment (/* ... */).
+    if (char === "/" && text[index + 1] === "*") {
+      let end = index + 2;
+      while (end < length && !(text[end] === "*" && text[end + 1] === "/")) {
+        end += 1;
+      }
+      end = Math.min(end + 2, length); // include the closing */
+      tokens.push(text.slice(index, end));
+      index = end;
+      continue;
+    }
+
+    // Structural punctuation.
+    if (char === "," || char === "(" || char === ")") {
+      tokens.push(char);
+      index += 1;
+      continue;
+    }
+
+    // Whitespace run.
+    if (/\s/.test(char)) {
+      let end = index + 1;
+      while (end < length && /\s/.test(text[end]!)) {
+        end += 1;
+      }
+      tokens.push(text.slice(index, end));
+      index = end;
+      continue;
+    }
+
+    // Bare word run, up to the next delimiter, quote, comment, or whitespace.
+    let end = index;
+    while (end < length) {
+      const next = text[end]!;
+      if (
+        next === "," ||
+        next === "(" ||
+        next === ")" ||
+        next === "'" ||
+        next === '"' ||
+        next === "`" ||
+        next === "[" ||
+        /\s/.test(next) ||
+        (next === "-" && text[end + 1] === "-") ||
+        (next === "/" && text[end + 1] === "*")
+      ) {
+        break;
+      }
+      end += 1;
+    }
+    tokens.push(text.slice(index, end));
+    index = end;
+  }
+
+  return tokens;
 }
 
 function splitTableCreation(statement: string): TableCreationTokens {

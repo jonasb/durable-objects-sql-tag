@@ -42,9 +42,9 @@ describe("alterTableColumns", () => {
       "SELECT type, sql FROM sqlite_master WHERE tbl_name = ?",
       "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
       "CREATE TABLE temp_alter_test (id INTEGER PRIMARY KEY, name TEXT UNIQUE) STRICT",
-      "INSERT INTO temp_alter_test SELECT * FROM alter_test",
-      "DROP TABLE alter_test",
-      "ALTER TABLE temp_alter_test RENAME TO alter_test",
+      'INSERT INTO "temp_alter_test" SELECT * FROM "alter_test"',
+      'DROP TABLE "alter_test"',
+      'ALTER TABLE "temp_alter_test" RENAME TO "alter_test"',
     ]);
   });
 
@@ -171,6 +171,49 @@ describe("alterTableColumns", () => {
       'CREATE TABLE "alter_test" (id INTEGER PRIMARY KEY, name TEXT NOT NULL)',
     );
     expect(schema).toContain("CREATE INDEX alter_test_name ON alter_test (name)");
+  });
+
+  test("handles a table name that requires quoting", async () => {
+    const { schema, rows } = await alterTable({
+      tableName: "order",
+      createSql: 'CREATE TABLE "order" (id INTEGER PRIMARY KEY, total INTEGER) STRICT',
+      actions: [{ action: "addNotNull", column: "total" }],
+      seedRows: [{ id: 1, total: 42 }],
+    });
+
+    expect(schema).toBe(
+      'CREATE TABLE "order" (id INTEGER PRIMARY KEY, total INTEGER NOT NULL) STRICT',
+    );
+    expect(rows).toEqual([{ id: 1, total: 42 }]);
+  });
+
+  test("does not split column definitions on commas inside string literals", async () => {
+    const { schema, rows } = await alterTable({
+      tableName: "alter_test",
+      createSql:
+        "CREATE TABLE alter_test (id INTEGER PRIMARY KEY, label TEXT DEFAULT 'a,b') STRICT",
+      actions: [{ action: "addNotNull", column: "label" }],
+      seedRows: [{ id: 1, label: "x,y" }],
+    });
+
+    expect(schema).toBe(
+      `CREATE TABLE "alter_test" (id INTEGER PRIMARY KEY, label TEXT DEFAULT 'a,b' NOT NULL) STRICT`,
+    );
+    expect(rows).toEqual([{ id: 1, label: "x,y" }]);
+  });
+
+  test("matches a column name that requires quoting", async () => {
+    const { schema, rows } = await alterTable({
+      tableName: "alter_test",
+      createSql: 'CREATE TABLE alter_test (id INTEGER PRIMARY KEY, "display name" TEXT) STRICT',
+      actions: [{ action: "addNotNull", column: "display name" }],
+      seedRows: [{ id: 1, "display name": "Ada" }],
+    });
+
+    expect(schema).toBe(
+      'CREATE TABLE "alter_test" (id INTEGER PRIMARY KEY, "display name" TEXT NOT NULL) STRICT',
+    );
+    expect(rows).toEqual([{ id: 1, "display name": "Ada" }]);
   });
 
   test("throws when the column does not exist", async () => {

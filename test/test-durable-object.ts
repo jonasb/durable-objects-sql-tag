@@ -272,17 +272,21 @@ export class TestDurableObject extends DurableObject {
       seedRows?: Record<string, Primitive>[];
     }>();
 
+    // Identifiers come from the test, not user input, but quote them so test cases can exercise
+    // table/column names that require quoting (e.g. reserved words).
+    const quote = (name: string) => `"${name.replace(/"/g, '""')}"`;
+    const quotedTable = quote(body.tableName);
+
     // Start from a clean slate so the endpoint can be called repeatedly within one instance.
-    this.ctx.storage.sql.exec(`DROP TABLE IF EXISTS ${body.tableName}`);
-    this.ctx.storage.sql.exec(`DROP TABLE IF EXISTS temp_${body.tableName}`);
+    this.ctx.storage.sql.exec(`DROP TABLE IF EXISTS ${quotedTable}`);
+    this.ctx.storage.sql.exec(`DROP TABLE IF EXISTS ${quote(`temp_${body.tableName}`)}`);
     this.ctx.storage.sql.exec(body.createSql);
 
     for (const row of body.seedRows ?? []) {
       const columns = Object.keys(row);
       const values = Object.values(row);
-      // Identifiers come from the test, not user input, so they're inlined into the query string.
       this.db.run({
-        query: `INSERT INTO ${body.tableName} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
+        query: `INSERT INTO ${quotedTable} (${columns.map(quote).join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
         values,
       });
     }
@@ -303,7 +307,7 @@ export class TestDurableObject extends DurableObject {
       .map((it) => it.sql)
       .join("\n\n");
 
-    const rows = this.db.queryMany({ query: `SELECT * FROM ${body.tableName} ORDER BY rowid` });
+    const rows = this.db.queryMany({ query: `SELECT * FROM ${quotedTable} ORDER BY rowid` });
 
     return new Response(JSON.stringify({ schema, queries, rows }), {
       headers: { "Content-Type": "application/json" },
