@@ -225,16 +225,11 @@ function applyMigration(
   db: RootDatabaseWrapper,
   definition: MigrationVersionDefinition,
   targetVersion: number,
-  verifyBeforeRecording?: () => void,
 ): void {
   if (definition.beforeMigrate) {
     definition.beforeMigrate(db);
   }
   definition.migrate(db);
-
-  // Hook for a `disableForeignKeys` migration to verify integrity *before* the migration is
-  // recorded as applied, so a failure throws without recording it (see the foreign-key check).
-  verifyBeforeRecording?.();
 
   db.run(sql`INSERT INTO metadata (key, value)
              VALUES ("schema_version", ${targetVersion})
@@ -265,12 +260,13 @@ async function applyMigrationWithoutForeignKeys(
 
   try {
     storage.transactionSync(() => {
-      applyMigration(
-        db,
-        definition,
-        targetVersion,
-        foreignKeysEnabled ? () => assertNoForeignKeyViolations(db, definition.name) : undefined,
-      );
+      applyMigration(db, definition, targetVersion);
+      // With enforcement off, a dangling reference the migration introduced won't throw on its
+      // own, and re-enabling foreign keys doesn't re-validate existing rows — so check explicitly.
+      // A violation throws, rolling back the whole transaction (including the schema_version bump).
+      if (foreignKeysEnabled) {
+        assertNoForeignKeyViolations(db, definition.name);
+      }
     });
   } finally {
     if (foreignKeysEnabled) {

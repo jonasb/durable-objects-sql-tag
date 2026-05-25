@@ -101,6 +101,9 @@ export function alterTableColumns(
   });
 }
 
+// Only ON DELETE actions matter here: the rebuild drops the parent (firing ON DELETE) and renames
+// the replacement into place, but never updates the parent key, so ON UPDATE actions never fire.
+// CASCADE/SET NULL/SET DEFAULT mutate the child's rows; NO ACTION/RESTRICT instead fail the check.
 const ROW_MUTATING_ON_DELETE = new Set(["CASCADE", "SET NULL", "SET DEFAULT"]);
 
 /**

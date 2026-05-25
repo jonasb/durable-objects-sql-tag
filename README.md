@@ -222,6 +222,12 @@ commits.
 > Without `disableForeignKeys`, `alterTableColumns` **throws** (rather than silently losing data or
 > failing at commit) when it detects another table referencing the one being rebuilt. Tables that
 > aren't referenced by any other table — and self-references — need no flag.
+>
+> **Atomicity:** toggling foreign keys requires committing, so a `disableForeignKeys` migration
+> commits any earlier pending migrations before it runs and commits its own changes before the next
+> one — a batch that includes such a migration is therefore _not_ applied as a single transaction.
+> Each migration is still recorded only after it succeeds, and its own changes roll back if it
+> throws, so a failed run leaves the schema at the last fully-applied version and can be retried.
 
 ### Query Callbacks
 
