@@ -69,7 +69,8 @@ export class TestDurableObject extends DurableObject {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.db = wrapDatabase(ctx.storage, { migrations });
+    this.db = wrapDatabase(ctx.storage);
+    ctx.blockConcurrencyWhile(() => this.db.migrate(migrations));
   }
 
   async fetch(request: Request): Promise<Response> {

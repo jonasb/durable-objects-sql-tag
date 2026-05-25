@@ -1,6 +1,6 @@
-import { SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
-import type { AlterTableColumnAction } from "../src/index.js";
+import { alterTableColumns, sql, wrapDatabase, type AlterTableColumnAction } from "../src/index.js";
 import { createTestContext } from "./test-helpers.js";
 
 const { urlWithInstance } = createTestContext("test-alter-table-columns");
@@ -37,15 +37,17 @@ describe("alterTableColumns", () => {
     expect(schema).toBe(
       'CREATE TABLE "alter_test" (id INTEGER PRIMARY KEY, name TEXT UNIQUE) STRICT',
     );
-    expect(queries).toEqual([
+    // The core rebuild steps must run in this exact order. Other queries (child-FK detection, the
+    // schema reads) are interleaved and asserted by behavior elsewhere, so filter to just these and
+    // check the relative order rather than pinning the full sequence.
+    const rebuildSteps = [
       "PRAGMA defer_foreign_keys = TRUE",
-      "SELECT type, sql FROM sqlite_master WHERE tbl_name = ?",
-      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
       "CREATE TABLE temp_alter_test (id INTEGER PRIMARY KEY, name TEXT UNIQUE) STRICT",
       'INSERT INTO "temp_alter_test" SELECT * FROM "alter_test"',
       'DROP TABLE "alter_test"',
       'ALTER TABLE "temp_alter_test" RENAME TO "alter_test"',
-    ]);
+    ];
+    expect(queries.filter((query) => rebuildSteps.includes(query))).toEqual(rebuildSteps);
   });
 
   test("adds a UNIQUE constraint on a quoted table name", async () => {
@@ -288,4 +290,191 @@ describe("alterTableColumns", () => {
     const { error } = await response.json<{ error: string }>();
     expect(error).toContain("Column not found: missing");
   });
+
+  // Regression: rebuilding a table that is the *parent* of an ON DELETE CASCADE foreign key would
+  // silently delete the child rows (the DROP fires the cascade, and foreign keys can't be disabled
+  // on Durable Objects). Refuse instead, and leave the data untouched. Run directly against the
+  // storage so we can set up the foreign key relationship.
+  test("refuses to rebuild a parent of an ON DELETE CASCADE foreign key, leaving data intact", async () => {
+    const id = env.TEST_DURABLE_OBJECT.idFromName(`cascade-${Date.now()}`);
+    const stub = env.TEST_DURABLE_OBJECT.get(id);
+
+    const result = await runInDurableObject(stub, (_instance, state) => {
+      const db = wrapDatabase(state.storage);
+      db.run({ query: "PRAGMA foreign_keys = ON" });
+      db.run(sql`CREATE TABLE parent (rowid INTEGER PRIMARY KEY, name TEXT NOT NULL) STRICT`);
+      db.run(sql`
+        CREATE TABLE child (
+          rowid INTEGER PRIMARY KEY,
+          parent_rowid INTEGER REFERENCES parent(rowid) ON DELETE CASCADE,
+          note TEXT NOT NULL
+        ) STRICT
+      `);
+      db.run(sql`INSERT INTO parent VALUES (1, 'p')`);
+      db.run(sql`INSERT INTO child VALUES (10, 1, 'keep me')`);
+
+      let error: string | null = null;
+      try {
+        alterTableColumns(db, "parent", [{ action: "dropNotNull", column: "name" }]);
+      } catch (e) {
+        error = e instanceof Error ? e.message : String(e);
+      }
+
+      return {
+        error,
+        childCount: db.queryOne<{ count: number }>(sql`SELECT count(*) AS count FROM child`).count,
+        parentName: db.queryOne<{ name: string | null }>(
+          sql`SELECT name FROM parent WHERE rowid = 1`,
+        ).name,
+      };
+    });
+
+    expect(result.error).toContain('Cannot rebuild "parent"');
+    expect(result.error).toContain("ON DELETE CASCADE");
+    expect(result.childCount).toBe(1); // child rows untouched
+    expect(result.parentName).toBe("p"); // parent unchanged (NOT NULL constraint still present)
+  });
+
+  // Even a plain (NO ACTION) reference can't tolerate the rebuild while FK enforcement is on — it
+  // fails the foreign key check at commit — so refuse with the same guidance rather than erroring.
+  test("refuses to rebuild a table referenced by a plain (NO ACTION) foreign key", async () => {
+    const id = env.TEST_DURABLE_OBJECT.idFromName(`noaction-${Date.now()}`);
+    const stub = env.TEST_DURABLE_OBJECT.get(id);
+
+    const error = await runInDurableObject(stub, (_instance, state) => {
+      const db = wrapDatabase(state.storage);
+      db.run({ query: "PRAGMA foreign_keys = ON" });
+      db.run(sql`CREATE TABLE par (rowid INTEGER PRIMARY KEY, name TEXT NOT NULL) STRICT`);
+      db.run(sql`
+        CREATE TABLE chi (rowid INTEGER PRIMARY KEY, p INTEGER REFERENCES par(rowid), note TEXT NOT NULL) STRICT
+      `);
+      try {
+        alterTableColumns(db, "par", [{ action: "dropNotNull", column: "name" }]);
+        return "did not throw";
+      } catch (e) {
+        return e instanceof Error ? e.message : String(e);
+      }
+    });
+
+    expect(error).toContain('Cannot rebuild "par"');
+    expect(error).toContain("disableForeignKeys");
+  });
+
+  // The escape hatch: a migration that sets `disableForeignKeys` can rebuild a cascade parent.
+  // The runner disables foreign keys around it (so the cascade doesn't fire), then restores them.
+  test("a disableForeignKeys migration rebuilds a cascade parent, preserving children and restoring FK", async () => {
+    const id = env.TEST_DURABLE_OBJECT.idFromName(`fk-migration-${Date.now()}`);
+    const stub = env.TEST_DURABLE_OBJECT.get(id);
+
+    const result = await runInDurableObject(stub, async (_instance, state) => {
+      const db = wrapDatabase(state.storage);
+      db.run({ query: "PRAGMA foreign_keys = ON" });
+      db.run(sql`CREATE TABLE doc (rowid INTEGER PRIMARY KEY, title TEXT NOT NULL) STRICT`);
+      db.run(sql`
+        CREATE TABLE doc_event (
+          rowid INTEGER PRIMARY KEY,
+          doc INTEGER REFERENCES doc(rowid) ON DELETE CASCADE,
+          body TEXT NOT NULL
+        ) STRICT
+      `);
+      db.run(sql`INSERT INTO doc VALUES (1, 'title')`);
+      db.run(sql`INSERT INTO doc_event VALUES (10, 1, 'keep me')`);
+
+      // The TestDurableObject constructor already migrated to version 2, so this migration sits at
+      // index 2; the first two entries are placeholders that won't re-run.
+      const noop = { name: "already applied", migrate() {} };
+      await db.migrate([
+        noop,
+        noop,
+        {
+          name: "Make doc.title optional",
+          disableForeignKeys: true,
+          migrate(db) {
+            alterTableColumns(db, "doc", [{ action: "dropNotNull", column: "title" }]);
+          },
+        },
+      ]);
+
+      return {
+        foreignKeys: db.pragma("foreign_keys"),
+        childCount: db.queryOne<{ count: number }>(sql`SELECT count(*) AS count FROM doc_event`)
+          .count,
+        docSql: db.queryOne<{ sql: string }>(
+          sql`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'doc'`,
+        ).sql,
+      };
+    });
+
+    expect(result.childCount).toBe(1); // cascade did not fire
+    expect(result.docSql).toContain("title TEXT)"); // NOT NULL dropped
+    expect(result.foreignKeys).toBe(1); // enforcement restored after the migration
+  });
+
+  // A disableForeignKeys migration runs with enforcement off, so SQLite won't catch a dangling
+  // reference the migration introduces — and re-enabling foreign keys doesn't re-validate existing
+  // rows. The runner runs `foreign_key_check` and refuses to record the migration if it left a
+  // violation, rather than silently committing corrupt data.
+  test("a disableForeignKeys migration that leaves a dangling reference throws and is not recorded", async () => {
+    const id = env.TEST_DURABLE_OBJECT.idFromName(`fk-violation-${Date.now()}`);
+    const stub = env.TEST_DURABLE_OBJECT.get(id);
+
+    const result = await runInDurableObject(stub, async (_instance, state) => {
+      const db = wrapDatabase(state.storage);
+      db.run({ query: "PRAGMA foreign_keys = ON" });
+      db.run(sql`CREATE TABLE doc (rowid INTEGER PRIMARY KEY, title TEXT NOT NULL) STRICT`);
+      db.run(sql`
+        CREATE TABLE doc_event (
+          rowid INTEGER PRIMARY KEY,
+          doc INTEGER REFERENCES doc(rowid) ON DELETE CASCADE,
+          body TEXT NOT NULL
+        ) STRICT
+      `);
+
+      const noop = { name: "already applied", migrate() {} };
+      let error: string | null = null;
+      try {
+        await db.migrate([
+          noop,
+          noop,
+          {
+            name: "Insert an orphan event",
+            disableForeignKeys: true,
+            migrate(db) {
+              // doc 999 does not exist; with foreign keys off this insert succeeds.
+              db.run(sql`INSERT INTO doc_event VALUES (10, 999, 'orphan')`);
+            },
+          },
+        ]);
+      } catch (e) {
+        error = e instanceof Error ? e.message : String(e);
+      }
+
+      return {
+        error,
+        foreignKeys: db.pragma("foreign_keys"),
+        orphanCount: db.queryOne<{ count: number }>(
+          sql`SELECT count(*) AS count FROM doc_event WHERE doc = 999`,
+        ).count,
+        // The TestDurableObject constructor already migrated to version 2; the failed migration
+        // (version 3) must not have advanced it.
+        schemaVersion: db.queryOne<{ value: number }>(
+          sql`SELECT value FROM metadata WHERE key = "schema_version"`,
+        ).value,
+      };
+    });
+
+    expect(result.error).toContain("foreign key violation");
+    expect(result.error).toContain("doc_event");
+    expect(result.foreignKeys).toBe(1); // enforcement restored even after the error was caught
+    expect(result.orphanCount).toBe(0); // failed migration writes were rolled back
+    expect(result.schemaVersion).toBe(2); // not recorded as applied
+  });
 });
+
+declare global {
+  namespace Cloudflare {
+    interface Env {
+      TEST_DURABLE_OBJECT: DurableObjectNamespace;
+    }
+  }
+}

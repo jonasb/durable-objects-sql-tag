@@ -70,7 +70,9 @@ export class MyDurableObject extends DurableObject {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.db = wrapDatabase(ctx.storage, { migrations });
+    this.db = wrapDatabase(ctx.storage);
+    // Migrations run asynchronously; block requests until they finish.
+    ctx.blockConcurrencyWhile(() => this.db.migrate(migrations));
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -117,7 +119,10 @@ export class MyDurableObject extends DurableObject {
 
 ### Migrations
 
-Migrations run automatically when `wrapDatabase` is called. The system tracks applied migrations in a `metadata` table:
+Call `db.migrate(migrations)` to apply pending migrations. It is **async** (see
+[Altering Columns](#altering-columns) for why), so run it where you can await — typically
+`ctx.blockConcurrencyWhile` in the Durable Object constructor, which also ensures requests wait
+until migrations finish. The applied version is tracked in a `metadata` table.
 
 ```ts
 const migrations: MigrationVersionDefinition[] = [
@@ -137,6 +142,10 @@ const migrations: MigrationVersionDefinition[] = [
     },
   },
 ];
+
+// In the Durable Object constructor:
+this.db = wrapDatabase(ctx.storage);
+ctx.blockConcurrencyWhile(() => this.db.migrate(migrations));
 
 // Check migration status without applying
 import { getMigrationStatus } from "durable-objects-sql-tag";
@@ -190,17 +199,52 @@ The rebuild runs inside a synchronous transaction and sets `PRAGMA defer_foreign
 that foreign key constraints aren't tripped mid-rebuild; they are still checked when the transaction
 commits.
 
+> **Foreign keys:** `alterTableColumns` rebuilds the table by dropping and recreating it. If another
+> table references it via a foreign key, that can't be done while foreign keys are enforced — an
+> `ON DELETE CASCADE`/`SET NULL`/`SET DEFAULT` action would fire and change the referencing rows, and
+> even a plain `NO ACTION` reference fails the foreign key check at commit. Disabling foreign keys
+> (`PRAGMA foreign_keys = OFF`) prevents this, but it's a no-op while a transaction is open, and
+> Durable Objects keeps an implicit transaction open across statements — so it can only be toggled
+> after committing via `storage.sync()`. That's why migrations are async: set
+> **`disableForeignKeys: true`** on the migration and the runner commits, disables foreign keys
+> around it, then restores them:
+>
+> ```ts
+> {
+>   name: "Make orders.customer_id optional",
+>   disableForeignKeys: true,
+>   migrate(db) {
+>     alterTableColumns(db, "orders", [{ action: "dropNotNull", column: "customer_id" }]);
+>   },
+> }
+> ```
+>
+> Without `disableForeignKeys`, `alterTableColumns` **throws** (rather than silently losing data or
+> failing at commit) when it detects another table referencing the one being rebuilt. Tables that
+> aren't referenced by any other table — and self-references — need no flag.
+>
+> **Atomicity:** toggling foreign keys requires committing, so a `disableForeignKeys` migration
+> commits any earlier pending migrations before it runs and commits its own changes before the next
+> one — a batch that includes such a migration is therefore _not_ applied as a single transaction.
+> Each migration is still recorded only after it succeeds, and its own changes roll back if it
+> throws, so a failed run leaves the schema at the last fully-applied version and can be retried.
+
 ### Query Callbacks
 
 Add callbacks for logging or instrumentation:
 
 ```ts
 const db = wrapDatabase(ctx.storage, {
-  migrations,
   beforeQuery: (query) => console.log("Executing:", query),
   afterQuery: (query, result) => console.log("Result:", result),
-  beforeMigration: (migrations) => console.log("Applying:", migrations),
 });
+
+// `beforeMigration` is a migrate option, not a query callback:
+ctx.blockConcurrencyWhile(() =>
+  db.migrate(migrations, {
+    beforeMigration: (migrations) => console.log("Applying:", migrations),
+  }),
+);
 
 // Or add callbacks to an existing wrapper
 const dbWithLogging = db.withCallbacks({
