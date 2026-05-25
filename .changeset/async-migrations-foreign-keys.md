@@ -17,5 +17,5 @@ ctx.blockConcurrencyWhile(() => this.db.migrate(migrations));
 
 Migrations are async because disabling foreign key enforcement (required to safely rebuild a table) is only possible once the implicit transaction is committed via `storage.sync()`.
 
-- New `disableForeignKeys?: boolean` option on a migration. When set, the runner commits, disables foreign keys for the migration, then restores them — needed to rebuild a table that another table references via a foreign key.
+- New `disableForeignKeys?: boolean` option on a migration. When set, the runner commits, disables foreign keys for the migration, then restores them — needed to rebuild a table that another table references via a foreign key. It verifies enforcement was actually restored, and runs `PRAGMA foreign_key_check` afterward so a migration that leaves a dangling reference throws (without being recorded) rather than silently committing corrupt data.
 - `alterTableColumns` now throws when foreign keys are enabled and another table references the one being rebuilt, instead of silently deleting child rows (for `ON DELETE CASCADE`/`SET NULL`/`SET DEFAULT`) or failing the foreign key check at commit (for plain references). Run it from a `disableForeignKeys: true` migration to alter these tables. Tables with no incoming references — and self-references — are unaffected.

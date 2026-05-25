@@ -37,17 +37,17 @@ describe("alterTableColumns", () => {
     expect(schema).toBe(
       'CREATE TABLE "alter_test" (id INTEGER PRIMARY KEY, name TEXT UNIQUE) STRICT',
     );
-    // The core rebuild steps, in order (other queries — child-FK detection, the schema reads —
-    // are asserted by behavior in the other tests rather than pinned here).
-    expect(queries).toEqual(
-      expect.arrayContaining([
-        "PRAGMA defer_foreign_keys = TRUE",
-        "CREATE TABLE temp_alter_test (id INTEGER PRIMARY KEY, name TEXT UNIQUE) STRICT",
-        'INSERT INTO "temp_alter_test" SELECT * FROM "alter_test"',
-        'DROP TABLE "alter_test"',
-        'ALTER TABLE "temp_alter_test" RENAME TO "alter_test"',
-      ]),
-    );
+    // The core rebuild steps must run in this exact order. Other queries (child-FK detection, the
+    // schema reads) are interleaved and asserted by behavior elsewhere, so filter to just these and
+    // check the relative order rather than pinning the full sequence.
+    const rebuildSteps = [
+      "PRAGMA defer_foreign_keys = TRUE",
+      "CREATE TABLE temp_alter_test (id INTEGER PRIMARY KEY, name TEXT UNIQUE) STRICT",
+      'INSERT INTO "temp_alter_test" SELECT * FROM "alter_test"',
+      'DROP TABLE "alter_test"',
+      'ALTER TABLE "temp_alter_test" RENAME TO "alter_test"',
+    ];
+    expect(queries.filter((query) => rebuildSteps.includes(query))).toEqual(rebuildSteps);
   });
 
   test("adds a UNIQUE constraint on a quoted table name", async () => {
@@ -408,6 +408,60 @@ describe("alterTableColumns", () => {
     expect(result.childCount).toBe(1); // cascade did not fire
     expect(result.docSql).toContain("title TEXT)"); // NOT NULL dropped
     expect(result.foreignKeys).toBe(1); // enforcement restored after the migration
+  });
+
+  // A disableForeignKeys migration runs with enforcement off, so SQLite won't catch a dangling
+  // reference the migration introduces — and re-enabling foreign keys doesn't re-validate existing
+  // rows. The runner runs `foreign_key_check` and refuses to record the migration if it left a
+  // violation, rather than silently committing corrupt data.
+  test("a disableForeignKeys migration that leaves a dangling reference throws and is not recorded", async () => {
+    const id = env.TEST_DURABLE_OBJECT.idFromName(`fk-violation-${Date.now()}`);
+    const stub = env.TEST_DURABLE_OBJECT.get(id);
+
+    const result = await runInDurableObject(stub, async (_instance, state) => {
+      const db = wrapDatabase(state.storage);
+      db.run({ query: "PRAGMA foreign_keys = ON" });
+      db.run(sql`CREATE TABLE doc (rowid INTEGER PRIMARY KEY, title TEXT NOT NULL) STRICT`);
+      db.run(sql`
+        CREATE TABLE doc_event (
+          rowid INTEGER PRIMARY KEY,
+          doc INTEGER REFERENCES doc(rowid) ON DELETE CASCADE,
+          body TEXT NOT NULL
+        ) STRICT
+      `);
+
+      const noop = { name: "already applied", migrate() {} };
+      let error: string | null = null;
+      try {
+        await db.migrate([
+          noop,
+          noop,
+          {
+            name: "Insert an orphan event",
+            disableForeignKeys: true,
+            migrate(db) {
+              // doc 999 does not exist; with foreign keys off this insert succeeds.
+              db.run(sql`INSERT INTO doc_event VALUES (10, 999, 'orphan')`);
+            },
+          },
+        ]);
+      } catch (e) {
+        error = e instanceof Error ? e.message : String(e);
+      }
+
+      return {
+        error,
+        // The TestDurableObject constructor already migrated to version 2; the failed migration
+        // (version 3) must not have advanced it.
+        schemaVersion: db.queryOne<{ value: number }>(
+          sql`SELECT value FROM metadata WHERE key = "schema_version"`,
+        ).value,
+      };
+    });
+
+    expect(result.error).toContain("foreign key violation");
+    expect(result.error).toContain("doc_event");
+    expect(result.schemaVersion).toBe(2); // not recorded as applied
   });
 });
 

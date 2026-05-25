@@ -60,6 +60,11 @@ export interface MigrationVersionDefinition {
    * the migration rebuilds a table that is the parent of an `ON DELETE CASCADE` / `SET NULL` /
    * `SET DEFAULT` foreign key (e.g. via {@link alterTableColumns}); without this, dropping the
    * table during the rebuild would fire the cascade and delete or modify the referencing rows.
+   *
+   * Because enforcement is off, SQLite won't catch a dangling reference the migration introduces,
+   * and re-enabling foreign keys doesn't re-validate existing rows — so the runner runs
+   * `PRAGMA foreign_key_check` afterward and throws (without recording the migration) if the
+   * migration left a violation.
    */
   disableForeignKeys?: boolean;
 }
@@ -220,11 +225,16 @@ function applyMigration(
   db: RootDatabaseWrapper,
   definition: MigrationVersionDefinition,
   targetVersion: number,
+  verifyBeforeRecording?: () => void,
 ): void {
   if (definition.beforeMigrate) {
     definition.beforeMigrate(db);
   }
   definition.migrate(db);
+
+  // Hook for a `disableForeignKeys` migration to verify integrity *before* the migration is
+  // recorded as applied, so a failure throws without recording it (see the foreign-key check).
+  verifyBeforeRecording?.();
 
   db.run(sql`INSERT INTO metadata (key, value)
              VALUES ("schema_version", ${targetVersion})
@@ -253,14 +263,46 @@ async function applyMigrationWithoutForeignKeys(
     }
   }
 
-  try {
-    applyMigration(db, definition, targetVersion);
-  } finally {
-    if (foreignKeysEnabled) {
-      // Commit the migration's writes, then re-enable enforcement (again, only possible once the
-      // transaction is committed).
-      await storage.sync();
-      db.run({ query: "PRAGMA foreign_keys = ON" });
+  // Run the migration. If it throws — including the foreign-key integrity check below — we neither
+  // commit nor re-enable enforcement: the migration isn't recorded as applied, and under the
+  // recommended `blockConcurrencyWhile` the Durable Object aborts before continuing.
+  applyMigration(
+    db,
+    definition,
+    targetVersion,
+    foreignKeysEnabled ? () => assertNoForeignKeyViolations(db, definition.name) : undefined,
+  );
+
+  if (foreignKeysEnabled) {
+    // Commit the migration's writes, then re-enable enforcement (again, only possible once the
+    // transaction is committed). Verify it took effect: a silent no-op here would leave foreign
+    // keys disabled for the rest of this instance's lifetime, so refuse to continue instead.
+    await storage.sync();
+    db.run({ query: "PRAGMA foreign_keys = ON" });
+    if (db.pragma("foreign_keys") !== 1) {
+      throw new Error(
+        `Migration "${definition.name}" applied, but foreign key enforcement could not be ` +
+          `restored afterward because a transaction is open. Refusing to continue with foreign ` +
+          `keys disabled. Run migrations where no transaction is active, e.g. ` +
+          `ctx.blockConcurrencyWhile(() => db.migrate(migrations)).`,
+      );
     }
+  }
+}
+
+/**
+ * Throws if `PRAGMA foreign_key_check` reports any violations. Run after a `disableForeignKeys`
+ * migration executes with enforcement off: re-enabling foreign keys does not re-validate existing
+ * rows, so a migration that left a dangling reference would otherwise go undetected.
+ */
+function assertNoForeignKeyViolations(db: RootDatabaseWrapper, migrationName: string): void {
+  const violations = db.pragmaFull<{ table: string }>("foreign_key_check");
+  if (violations.length > 0) {
+    const tables = [...new Set(violations.map((violation) => violation.table))].join(", ");
+    throw new Error(
+      `Migration "${migrationName}" left ${violations.length} foreign key violation(s) (in: ` +
+        `${tables}) while foreign keys were disabled. Aborting before committing — fix the ` +
+        `migration so it preserves referential integrity.`,
+    );
   }
 }
