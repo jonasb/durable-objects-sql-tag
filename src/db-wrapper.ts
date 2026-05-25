@@ -263,29 +263,29 @@ async function applyMigrationWithoutForeignKeys(
     }
   }
 
-  // Run the migration. If it throws — including the foreign-key integrity check below — we neither
-  // commit nor re-enable enforcement: the migration isn't recorded as applied, and under the
-  // recommended `blockConcurrencyWhile` the Durable Object aborts before continuing.
-  applyMigration(
-    db,
-    definition,
-    targetVersion,
-    foreignKeysEnabled ? () => assertNoForeignKeyViolations(db, definition.name) : undefined,
-  );
-
-  if (foreignKeysEnabled) {
-    // Commit the migration's writes, then re-enable enforcement (again, only possible once the
-    // transaction is committed). Verify it took effect: a silent no-op here would leave foreign
-    // keys disabled for the rest of this instance's lifetime, so refuse to continue instead.
-    await storage.sync();
-    db.run({ query: "PRAGMA foreign_keys = ON" });
-    if (db.pragma("foreign_keys") !== 1) {
-      throw new Error(
-        `Migration "${definition.name}" applied, but foreign key enforcement could not be ` +
-          `restored afterward because a transaction is open. Refusing to continue with foreign ` +
-          `keys disabled. Run migrations where no transaction is active, e.g. ` +
-          `ctx.blockConcurrencyWhile(() => db.migrate(migrations)).`,
+  try {
+    storage.transactionSync(() => {
+      applyMigration(
+        db,
+        definition,
+        targetVersion,
+        foreignKeysEnabled ? () => assertNoForeignKeyViolations(db, definition.name) : undefined,
       );
+    });
+  } finally {
+    if (foreignKeysEnabled) {
+      // Ensure SQLite is outside the migration transaction so restoring enforcement is effective
+      // even when the migration threw and the transaction rolled back.
+      await storage.sync();
+      db.run({ query: "PRAGMA foreign_keys = ON" });
+      if (db.pragma("foreign_keys") !== 1) {
+        throw new Error(
+          `Migration "${definition.name}" applied, but foreign key enforcement could not be ` +
+            `restored afterward because a transaction is open. Refusing to continue with foreign ` +
+            `keys disabled. Run migrations where no transaction is active, e.g. ` +
+            `ctx.blockConcurrencyWhile(() => db.migrate(migrations)).`,
+        );
+      }
     }
   }
 }

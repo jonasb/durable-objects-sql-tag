@@ -451,6 +451,10 @@ describe("alterTableColumns", () => {
 
       return {
         error,
+        foreignKeys: db.pragma("foreign_keys"),
+        orphanCount: db.queryOne<{ count: number }>(
+          sql`SELECT count(*) AS count FROM doc_event WHERE doc = 999`,
+        ).count,
         // The TestDurableObject constructor already migrated to version 2; the failed migration
         // (version 3) must not have advanced it.
         schemaVersion: db.queryOne<{ value: number }>(
@@ -461,6 +465,8 @@ describe("alterTableColumns", () => {
 
     expect(result.error).toContain("foreign key violation");
     expect(result.error).toContain("doc_event");
+    expect(result.foreignKeys).toBe(1); // enforcement restored even after the error was caught
+    expect(result.orphanCount).toBe(0); // failed migration writes were rolled back
     expect(result.schemaVersion).toBe(2); // not recorded as applied
   });
 });
