@@ -26,16 +26,18 @@ interface BaseDatabaseWrapper {
 export interface RootDatabaseWrapper extends BaseDatabaseWrapper {
   withCallbacks(callbacks: QueryCallbacks): RootDatabaseWrapper;
   transactionSync<T>(fn: () => T): T;
+  /**
+   * Apply pending migrations. Async because migrations that set `disableForeignKeys` need to commit
+   * the implicit transaction (via `storage.sync()`) in order to toggle foreign key enforcement,
+   * which SQLite only allows when no transaction is open. Run it where you can await — typically
+   * `ctx.blockConcurrencyWhile(() => db.migrate(migrations))` in the Durable Object constructor.
+   */
+  migrate(migrations: MigrationVersionDefinition[], options?: MigrateOptions): Promise<void>;
 }
 
 export type TransactionDatabaseWrapper = RootDatabaseWrapper;
 
 export type DatabaseWrapper = RootDatabaseWrapper;
-
-interface Options extends QueryCallbacks {
-  beforeMigration?: (migrationsToApply: MigrationVersionDefinition[]) => void;
-  migrations?: MigrationVersionDefinition[];
-}
 
 interface QueryCallbacks {
   beforeQuery?: (query: string) => void;
@@ -45,10 +47,21 @@ interface QueryCallbacks {
   ) => void;
 }
 
+export interface MigrateOptions {
+  beforeMigration?: (migrationsToApply: MigrationVersionDefinition[]) => void;
+}
+
 export interface MigrationVersionDefinition {
   name: string;
   beforeMigrate?: (db: DatabaseWrapper) => void;
   migrate: (db: DatabaseWrapper) => void;
+  /**
+   * Disable foreign key enforcement while this migration runs, restoring it afterward. Needed when
+   * the migration rebuilds a table that is the parent of an `ON DELETE CASCADE` / `SET NULL` /
+   * `SET DEFAULT` foreign key (e.g. via {@link alterTableColumns}); without this, dropping the
+   * table during the rebuild would fire the cascade and delete or modify the referencing rows.
+   */
+  disableForeignKeys?: boolean;
 }
 
 export function getMigrationStatus(
@@ -67,15 +80,9 @@ export function getMigrationStatus(
 
 export function wrapDatabase(
   storage: DurableObjectStorage,
-  options?: Options,
+  options?: QueryCallbacks,
 ): RootDatabaseWrapper {
-  const wrapper = createWrapper(storage, options);
-
-  if (options?.migrations) {
-    migrateDatabase(wrapper, options.migrations, options);
-  }
-
-  return wrapper;
+  return createWrapper(storage, options);
 }
 
 function createWrapper(
@@ -101,6 +108,7 @@ function createWrapper(
     transactionSync: <T>(fn: () => T): T => {
       return storage.transactionSync(fn);
     },
+    migrate: (migrations, options) => migrateDatabase(storage, wrapper, migrations, options),
     pragma: (pragma) => {
       const query = `PRAGMA ${pragma}`;
       callbacks?.beforeQuery?.(query);
@@ -178,12 +186,13 @@ function getSchemaVersion(sql: SqlStorage): number {
   return currentVersion;
 }
 
-function migrateDatabase(
+async function migrateDatabase(
+  storage: DurableObjectStorage,
   db: RootDatabaseWrapper,
   versions: MigrationVersionDefinition[],
-  options: Options,
-) {
-  const initialVersion = getSchemaVersion(db.storage);
+  options: MigrateOptions | undefined,
+): Promise<void> {
+  const initialVersion = getSchemaVersion(storage.sql);
 
   const finalTargetVersion = versions.length;
   if (initialVersion === finalTargetVersion) {
@@ -191,7 +200,7 @@ function migrateDatabase(
   }
 
   const migrationsToApply = versions.slice(initialVersion, finalTargetVersion);
-  options.beforeMigration?.(migrationsToApply);
+  options?.beforeMigration?.(migrationsToApply);
 
   for (let version = initialVersion; version < versions.length; version++) {
     const definition = versions[version]!;
@@ -199,13 +208,59 @@ function migrateDatabase(
 
     console.log(`Migrating database to version ${targetVersion}: ${definition.name}...`);
 
-    if (definition.beforeMigrate) {
-      definition.beforeMigrate(db);
+    if (definition.disableForeignKeys) {
+      await applyMigrationWithoutForeignKeys(storage, db, definition, targetVersion);
+    } else {
+      applyMigration(db, definition, targetVersion);
     }
-    definition.migrate(db);
+  }
+}
 
-    db.run(sql`INSERT INTO metadata (key, value)
-               VALUES ("schema_version", ${targetVersion})
-               ON CONFLICT(key) DO UPDATE SET value = ${targetVersion}`);
+function applyMigration(
+  db: RootDatabaseWrapper,
+  definition: MigrationVersionDefinition,
+  targetVersion: number,
+): void {
+  if (definition.beforeMigrate) {
+    definition.beforeMigrate(db);
+  }
+  definition.migrate(db);
+
+  db.run(sql`INSERT INTO metadata (key, value)
+             VALUES ("schema_version", ${targetVersion})
+             ON CONFLICT(key) DO UPDATE SET value = ${targetVersion}`);
+}
+
+async function applyMigrationWithoutForeignKeys(
+  storage: DurableObjectStorage,
+  db: RootDatabaseWrapper,
+  definition: MigrationVersionDefinition,
+  targetVersion: number,
+): Promise<void> {
+  // PRAGMA foreign_keys is a no-op while a transaction is open, and Durable Objects keeps an
+  // implicit transaction open across statements. Commit it first so the toggle takes effect.
+  await storage.sync();
+
+  const foreignKeysEnabled = db.pragma("foreign_keys") === 1;
+  if (foreignKeysEnabled) {
+    db.run({ query: "PRAGMA foreign_keys = OFF" });
+    if (db.pragma("foreign_keys") === 1) {
+      throw new Error(
+        `Migration "${definition.name}" set disableForeignKeys, but foreign keys could not be ` +
+          `disabled because a transaction is open. Run migrations where no transaction is active, ` +
+          `e.g. ctx.blockConcurrencyWhile(() => db.migrate(migrations)).`,
+      );
+    }
+  }
+
+  try {
+    applyMigration(db, definition, targetVersion);
+  } finally {
+    if (foreignKeysEnabled) {
+      // Commit the migration's writes, then re-enable enforcement (again, only possible once the
+      // transaction is committed).
+      await storage.sync();
+      db.run({ query: "PRAGMA foreign_keys = ON" });
+    }
   }
 }

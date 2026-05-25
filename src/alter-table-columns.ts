@@ -30,20 +30,36 @@ export type AlterTableColumnAction =
  * }
  * ```
  *
- * The rebuild runs inside a synchronous transaction. Foreign key enforcement is deferred until the
- * transaction commits (`PRAGMA defer_foreign_keys = TRUE`) so that dropping and recreating the
- * table doesn't trip foreign key constraints mid-rebuild.
+ * The rebuild runs inside a synchronous transaction with `PRAGMA defer_foreign_keys = TRUE`, so
+ * foreign key *checks* are deferred to commit time and the transient orphan rows created while the
+ * table is dropped and recreated don't trip enforcement.
+ *
+ * **Throws if foreign keys are enabled and another table references this one via a foreign key.**
+ * Rebuilding drops and recreates the table, which a referencing table can't tolerate while foreign
+ * keys are enforced: an `ON DELETE CASCADE`/`SET NULL`/`SET DEFAULT` action would fire and silently
+ * change the child's rows, and even a plain `NO ACTION` reference fails the foreign key check at
+ * commit. To alter such a table, run it from a migration that sets `disableForeignKeys: true` — the
+ * runner disables foreign key enforcement around it and restores it afterward, at which point this
+ * helper proceeds rather than throwing. (Self-references are fine and don't require the flag.)
  */
 export function alterTableColumns(
   db: DatabaseWrapper,
   tableName: string,
   actions: AlterTableColumnAction[],
 ): void {
+  // Following https://sqlite.org/lang_altertable.html#making_other_kinds_of_table_schema_changes
   db.transactionSync(() => {
-    // Following https://sqlite.org/lang_altertable.html#making_other_kinds_of_table_schema_changes
-    // Defer foreign key enforcement until the transaction commits. PRAGMA foreign_keys cannot be
-    // changed inside a transaction, so the documented "disable foreign_keys" step is replaced with
-    // defer_foreign_keys, which has the same effect for the duration of the transaction.
+    // If foreign keys are enabled, refuse to rebuild a table that another table references: dropping
+    // and recreating it either fires an ON DELETE cascade/set action on the child (silent data
+    // loss) or leaves the child pointing at a dropped table and fails the foreign key check at
+    // commit. Both require foreign keys to be off, which only a `disableForeignKeys` migration can
+    // arrange on Durable Objects. When they're already off, the rebuild is safe and we proceed.
+    if (db.pragma("foreign_keys") === 1) {
+      assertNotReferencedByOtherTables(db, tableName);
+    }
+
+    // Defer foreign key *checks* (not actions) until commit so the transient orphan rows that
+    // exist between dropping the old table and renaming the new one don't trip enforcement.
     db.run({ query: "PRAGMA defer_foreign_keys = TRUE" });
 
     const tempTableName = `temp_${tableName}`;
@@ -83,6 +99,42 @@ export function alterTableColumns(
       db.run({ query: sqlStatement });
     }
   });
+}
+
+const ROW_MUTATING_ON_DELETE = new Set(["CASCADE", "SET NULL", "SET DEFAULT"]);
+
+/**
+ * Throws if a *different* table references `tableName` via a foreign key. Rebuilding drops and
+ * recreates the table, which a referencing table can't tolerate while foreign keys are enforced —
+ * either an `ON DELETE` cascade/set action fires and changes the child's rows, or the child is left
+ * referencing a dropped table and the foreign key check fails at commit. Self-references are fine:
+ * the foreign key is rewritten and recreated along with the table, so it stays consistent.
+ */
+function assertNotReferencedByOtherTables(db: DatabaseWrapper, tableName: string): void {
+  const target = tableName.toLowerCase();
+  const tables = db.queryMany<{ name: string }>(
+    sql`SELECT name FROM sqlite_master WHERE type = 'table'`,
+  );
+  for (const { name } of tables) {
+    if (name.toLowerCase() === target) {
+      continue; // a table's references to itself are rebuilt with it
+    }
+    const foreignKeys = db.pragmaFull<{ table: string; from: string; on_delete: string }>(
+      `foreign_key_list(${quoteIdentifier(name)})`,
+    );
+    for (const fk of foreignKeys) {
+      if (fk.table.toLowerCase() === target) {
+        const consequence = ROW_MUTATING_ON_DELETE.has(fk.on_delete.toUpperCase())
+          ? `fire its ON DELETE ${fk.on_delete} action and delete or modify rows in "${name}"`
+          : `leave "${name}" referencing a dropped table and fail the foreign key check`;
+        throw new Error(
+          `Cannot rebuild "${tableName}" while foreign keys are enabled: table "${name}" ` +
+            `references it (column "${fk.from}"). Rebuilding drops and recreates "${tableName}", ` +
+            `which would ${consequence}. Run this from a migration with \`disableForeignKeys: true\`.`,
+        );
+      }
+    }
+  }
 }
 
 function modifyTableSql(
