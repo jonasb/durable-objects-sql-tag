@@ -229,11 +229,16 @@ Add callbacks for logging or instrumentation:
 
 ```ts
 const db = wrapDatabase(ctx.storage, {
-  migrations,
   beforeQuery: (query) => console.log("Executing:", query),
   afterQuery: (query, result) => console.log("Result:", result),
-  beforeMigration: (migrations) => console.log("Applying:", migrations),
 });
+
+// `beforeMigration` is a migrate option, not a query callback:
+ctx.blockConcurrencyWhile(() =>
+  db.migrate(migrations, {
+    beforeMigration: (migrations) => console.log("Applying:", migrations),
+  }),
+);
 
 // Or add callbacks to an existing wrapper
 const dbWithLogging = db.withCallbacks({
