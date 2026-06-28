@@ -49,6 +49,16 @@ interface QueryCallbacks {
 
 export interface MigrateOptions {
   beforeMigration?: (migrationsToApply: MigrationVersionDefinition[]) => void;
+  /**
+   * Called right before each individual migration is applied. Use this to log migration progress —
+   * the library itself does not log. For example:
+   *
+   * ```ts
+   * onMigrate: ({ targetVersion, definition }) =>
+   *   console.log(`Migrating database to version ${targetVersion}: ${definition.name}...`),
+   * ```
+   */
+  onMigrate?: (info: { targetVersion: number; definition: MigrationVersionDefinition }) => void;
 }
 
 export interface MigrationVersionDefinition {
@@ -211,7 +221,7 @@ async function migrateDatabase(
     const definition = versions[version]!;
     const targetVersion = version + 1;
 
-    console.log(`Migrating database to version ${targetVersion}: ${definition.name}...`);
+    options?.onMigrate?.({ targetVersion, definition });
 
     if (definition.disableForeignKeys) {
       await applyMigrationWithoutForeignKeys(storage, db, definition, targetVersion);

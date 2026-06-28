@@ -243,6 +243,9 @@ const db = wrapDatabase(ctx.storage, {
 ctx.blockConcurrencyWhile(() =>
   db.migrate(migrations, {
     beforeMigration: (migrations) => console.log("Applying:", migrations),
+    // The library never logs on its own — use `onMigrate` to log each migration:
+    onMigrate: ({ targetVersion, definition }) =>
+      console.log(`Migrating database to version ${targetVersion}: ${definition.name}...`),
   }),
 );
 
