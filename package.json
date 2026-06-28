@@ -1,6 +1,6 @@
 {
   "name": "durable-objects-sql-tag",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A template literal for working with Cloudflare Durable Objects SQL storage",
   "keywords": [
     "durable-object",
