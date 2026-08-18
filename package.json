@@ -39,7 +39,7 @@
   },
   "devDependencies": {
     "@changesets/cli": "^3.0.0",
-    "@cloudflare/vitest-pool-workers": "^0.20.1",
+    "@cloudflare/vitest-pool-workers": "^0.21.3",
     "@types/node": "^26.0.1",
     "prettier": "^3.5.3",
     "tsdown": "^0.22.0",
